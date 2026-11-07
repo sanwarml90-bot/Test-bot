@@ -1,171 +1,238 @@
 import os
 import asyncio
+import tempfile
 from dotenv import load_dotenv
-from pyrogram import Client, filters
+from gtts import gTTS
+from mutagen.mp3 import MP3
+
+from pyrogram import Client, filters, idle
+from pyrogram.handlers import MessageHandler
 from pyrogram.types import Message
+
 from pytgcalls import PyTgCalls
 from pytgcalls.types import MediaStream
-from gtts import gTTS
 
-# Load environment variables
+
 load_dotenv()
 
-API_ID = int(os.getenv("API_ID"))
+API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SESSION_STRING = os.getenv("SESSION_STRING")
 
-# 1. Bot Client (Commands handle karne ke liye)
-bot = Client(
-    "TTS_Bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN
-)
+if not all([API_ID, API_HASH, BOT_TOKEN, SESSION_STRING]):
+    raise RuntimeError("ERROR: .env mein required variables missing hain.")
 
-# 2. Assistant Client (VC join karne ke liye - Userbot)
-# Note: Yeh bot nahi hai, yeh aapka account hai
-assistant = Client(
-    "TTS_Assistant",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    session_string=SESSION_STRING
-)
+API_ID = int(API_ID)
 
-# 3. PyTgCalls Instance
-call_py = PyTgCalls(assistant)
+bot = None
+assistant = None
+call_py = None
+processing_lock = None
 
-# Global lock taaki ek waqt mein ek hi command chale
-processing_lock = asyncio.Lock()
 
-async def speak_text(chat_id: int, text: str, repeat: int = 1):
-    """Text ko audio mein badal kar VC mein play karta hai"""
-    # Text to Speech
-    tts = gTTS(text=text, lang='hi') # 'hi' ya 'en' apni zaroorat ke hisaab se badlein
-    audio_file = f"tts_{chat_id}.mp3"
-    tts.save(audio_file)
+async def generate_audio(text):
+    """Hindi text ko MP3 mein convert kare."""
 
-    # VC mein play karein 'repeat' baar
-    for i in range(repeat):
-        # MediaStream object ka istemal karein (naye pytgcalls versions ke liye)
-        # Agar purana version hai toh simply audio_file path bhi chal sakta hai
-        stream = MediaStream(audio_file)
-        await call_py.play(chat_id, stream)
-        
-        # File play hone ka intezaar karein
-        # Ek simple tareeka: duration ka wait karna, ya stream_end event ka wait karna
-        # Yahan hum thoda wait kar rahe hain (duration nikalna is example mein complex hai)
-        # Behtar hoga ki aap stream_end event handler use karein, par simplicity ke liye:
-        await asyncio.sleep(5) # Approx wait, real implementation mein duration calculate karein
-        
-        # Agar repeat baaki hai toh stop karke wapas play karein
-        if i < repeat - 1:
-            await call_py.leave_call(chat_id) # Chhota break
-            await asyncio.sleep(1)
-            # Wapas join karna padega agar leave kiya toh, isliye better hai play karte rehna
-            # Neeche wala logic zyada sahi hai: ek hi baar mein loop nahi, balki queue use karein
-            pass
+    temp = tempfile.NamedTemporaryFile(
+        suffix=".mp3",
+        delete=False
+    )
+    audio_file = temp.name
+    temp.close()
 
-    # Cleanup
-    if os.path.exists(audio_file):
-        os.remove(audio_file)
+    try:
+        await asyncio.to_thread(
+            lambda: gTTS(text=text, lang="hi").save(audio_file)
+        )
 
-# --- Command Handlers ---
+        duration = MP3(audio_file).info.length
 
-@bot.on_message(filters.command("tts") & filters.group)
-async def tts_handler(client: Client, message: Message):
-    if len(message.command) < 2:
-        await message.reply_text("Usage: /tts <text>")
+        return audio_file, duration
+
+    except Exception:
+        if os.path.exists(audio_file):
+            os.remove(audio_file)
+        raise
+
+
+async def speak_text(chat_id, text, repeat=1):
+    """Voice chat mein audio play kare."""
+
+    audio_file = None
+
+    try:
+        audio_file, duration = await generate_audio(text)
+
+        for index in range(repeat):
+
+            print(
+                f"Playing audio: {index + 1}/{repeat}, "
+                f"Chat: {chat_id}"
+            )
+
+            await call_py.play(
+                chat_id,
+                MediaStream(audio_file)
+            )
+
+            # Audio complete hone ka wait
+            await asyncio.sleep(duration + 1.5)
+
+    finally:
+        if audio_file and os.path.exists(audio_file):
+            os.remove(audio_file)
+
+
+async def process_tts(message: Message, repeat: int):
+
+    global processing_lock
+
+    if not message.command or len(message.command) < 2:
+        await message.reply_text(
+            "Usage: /tts <text>"
+        )
         return
-    
-    text = " ".join(message.command[1:])
-    chat_id = message.chat.id
+
+    text = " ".join(message.command[1:]).strip()
+
+    if len(text) > 500:
+        await message.reply_text(
+            "❌ Maximum 500 characters allowed."
+        )
+        return
 
     if processing_lock.locked():
-        await message.reply_text("⏳ Bot abhi vyast hai, kripya pratiksha karein...")
+        await message.reply_text(
+            "⏳ Bot abhi busy hai. Thodi der baad try karein."
+        )
         return
 
     async with processing_lock:
-        status_msg = await message.reply_text("🔊 VC join kar raha hoon aur bol raha hoon...")
-        
+
+        status = await message.reply_text(
+            "🔊 Voice chat mein audio play kar raha hoon..."
+        )
+
         try:
-            # Ensure assistant is started
-            if not assistant.is_connected:
-                await assistant.start()
-            
-            # VC mein join karein aur bolein
-            # Note: Agar pehle se join hai toh play() automatically handle kar lega
-            await speak_text(chat_id, text, repeat=1)
-            
-            await status_msg.edit_text("✅ Ho gaya!")
-            
-        except Exception as e:
-            await status_msg.edit_text(f"❌ Error: {e}")
-            # Debugging ke liye print
-            print(f"Error: {e}")
+            await speak_text(
+                message.chat.id,
+                text,
+                repeat
+            )
 
-@bot.on_message(filters.command("tts2") & filters.group)
-async def tts2_handler(client: Client, message: Message):
-    if len(message.command) < 2:
-        await message.reply_text("Usage: /tts2 <text>")
-        return
-    
-    text = " ".join(message.command[1:])
-    chat_id = message.chat.id
+            await status.edit_text(
+                f"✅ Audio complete! ({repeat} time)"
+            )
 
-    if processing_lock.locked():
-        await message.reply_text("⏳ Bot abhi vyast hai...")
-        return
+        except Exception as error:
 
-    async with processing_lock:
-        status_msg = await message.reply_text("🔊 2 baar bolunga...")
-        try:
-            if not assistant.is_connected:
-                await assistant.start()
-            
-            await speak_text(chat_id, text, repeat=2)
-            await status_msg.edit_text("✅ 2 baar bol diya!")
-        except Exception as e:
-            await status_msg.edit_text(f"❌ Error: {e}")
+            print(f"TTS ERROR: {error}")
 
-@bot.on_message(filters.command("tts3") & filters.group)
-async def tts3_handler(client: Client, message: Message):
-    if len(message.command) < 2:
-        await message.reply_text("Usage: /tts3 <text>")
-        return
-    
-    text = " ".join(message.command[1:])
-    chat_id = message.chat.id
+            await status.edit_text(
+                "❌ Audio play nahi ho paya.\n"
+                f"Error: {str(error)[:700]}\n\n"
+                "Check karein ki group mein voice chat active hai "
+                "aur Assistant ko join karne ki permission hai."
+            )
 
-    if processing_lock.locked():
-        await message.reply_text("⏳ Bot abhi vyast hai...")
-        return
 
-    async with processing_lock:
-        status_msg = await message.reply_text("🔊 3 baar bolunga...")
-        try:
-            if not assistant.is_connected:
-                await assistant.start()
-            
-            await speak_text(chat_id, text, repeat=3)
-            await status_msg.edit_text("✅ 3 baar bol diya!")
-        except Exception as e:
-            await status_msg.edit_text(f"❌ Error: {e}")
+async def tts_handler(client, message):
+    await process_tts(message, 1)
 
-# --- Main Runner ---
+
+async def tts2_handler(client, message):
+    await process_tts(message, 2)
+
+
+async def tts3_handler(client, message):
+    await process_tts(message, 3)
+
 
 async def main():
+
+    global bot, assistant, call_py, processing_lock
+
     print("Bot start ho raha hai...")
-    await bot.start()
-    await assistant.start()
-    await call_py.start()
-    
-    # Bot ko online rakhein
-    from pyrogram import idle
-    await idle()
-    
-    await bot.stop()
-    await assistant.stop()
+
+    processing_lock = asyncio.Lock()
+
+    # Clients ko running event loop ke andar initialize karein.
+    bot = Client(
+        "TTS_Bot",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        bot_token=BOT_TOKEN
+    )
+
+    assistant = Client(
+        "TTS_Assistant",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        session_string=SESSION_STRING
+    )
+
+    call_py = PyTgCalls(assistant)
+
+    # Commands register karein.
+    bot.add_handler(
+        MessageHandler(
+            tts_handler,
+            filters.command("tts") & filters.group
+        )
+    )
+
+    bot.add_handler(
+        MessageHandler(
+            tts2_handler,
+            filters.command("tts2") & filters.group
+        )
+    )
+
+    bot.add_handler(
+        MessageHandler(
+            tts3_handler,
+            filters.command("tts3") & filters.group
+        )
+    )
+
+    bot_started = False
+    assistant_started = False
+    calls_started = False
+
+    try:
+
+        await bot.start()
+        bot_started = True
+        print("Bot client started.")
+
+        await assistant.start()
+        assistant_started = True
+        print("Assistant client started.")
+
+        await call_py.start()
+        calls_started = True
+        print("PyTgCalls started.")
+
+        print("BOT IS RUNNING!")
+
+        await idle()
+
+    finally:
+
+        print("Bot shutting down...")
+
+        if calls_started:
+            await call_py.stop()
+
+        if assistant_started:
+            await assistant.stop()
+
+        if bot_started:
+            await bot.stop()
+
+        print("Bot stopped.")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
