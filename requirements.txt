@@ -1,0 +1,7 @@
+pyrogrammod
+py-tgcalls
+python-dotenv
+TgCrypto
+# Note: TTS ke liye system package 'espeak-ng' chahiye (offline Hindi voice).
+# apt se install hota hai: apt-get install -y espeak-ng
+# gTTS yahan rate-limited hai (429), edge-tts ko WebSocket chahiye jo proxy se nahi chalta.
