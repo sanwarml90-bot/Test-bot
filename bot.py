@@ -133,7 +133,7 @@ def _gen_tts(text: str, audio_file: str) -> int:
     Thread mein chalega, event loop se alag."""
     raw = audio_file.replace(".wav", "_raw.wav")
     r1 = subprocess.run(
-        ["espeak-ng", "-v", "hi", "-s", "150", "-w", raw, text],
+        ["espeak-ng", "-v", "hi+f2", "-s", "150", "-w", raw, text],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
