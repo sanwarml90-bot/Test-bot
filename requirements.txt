@@ -1,0 +1,4 @@
+pyrogram
+py-tgcalls
+gTTS
+python-dotenv
