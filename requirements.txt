@@ -2,6 +2,8 @@ pyrogrammod
 py-tgcalls
 python-dotenv
 TgCrypto
-# Note: TTS ke liye system package 'espeak-ng' chahiye (offline Hindi voice).
-# apt se install hota hai: apt-get install -y espeak-ng
-# gTTS yahan rate-limited hai (429), edge-tts ko WebSocket chahiye jo proxy se nahi chalta.
+edge-tts
+# Note: TTS ke liye Edge TTS (Microsoft, free, no API key) use hota hai —
+# natural Hindi female voice (hi-IN-SwaraNeural). Railway par direct
+# internet hai, isliye Edge TTS yahan chalta hai. ffmpeg abhi bhi chahiye
+# (audio ko 48kHz stereo mein convert karne ke liye) — Dockerfile se install hota hai.

@@ -7,6 +7,7 @@ import traceback
 import logging
 import shutil
 import time
+import edge_tts
 from dotenv import load_dotenv
 from pyrogram import Client, filters
 from pyrogram.types import (
@@ -126,44 +127,56 @@ def get_audio_duration(path: str, text: str = "") -> float:
     return max(5.0, len(text) * 0.12)
 
 
-def _gen_tts(text: str, audio_file: str) -> int:
-    """espeak-ng se Hindi audio banao, phir ffmpeg se 48kHz stereo
-    mein convert karo (Telegram VC 48kHz chahta hai; espeak ka
-    22050Hz mono seedha bajao to awaaz garbled/sunai nahi deti).
-    Thread mein chalega, event loop se alag."""
-    raw = audio_file.replace(".wav", "_raw.wav")
-    r1 = subprocess.run(
-        ["espeak-ng", "-v", "hi+f2", "-s", "150", "-w", raw, text],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    if r1.returncode != 0:
-        return r1.returncode
-    r2 = subprocess.run(
-        ["ffmpeg", "-y", "-v", "quiet", "-i", raw,
+async def _gen_tts(text: str, audio_file: str) -> int:
+    """Edge TTS (Microsoft, free, no API key) se natural Hindi female
+    voice (hi-IN-SwaraNeural) mein audio banao; agar Edge TTS fail ho
+    to espeak-ng (hi+f2) fallback. Phir ffmpeg se 48kHz stereo mein
+    convert karo (Telegram VC 48kHz chahta hai). Railway par direct
+    internet hai, isliye Edge TTS yahan chalta hai."""
+    mp3_file = audio_file.replace(".wav", ".mp3")
+    raw_file = audio_file.replace(".wav", "_raw.wav")
+    src_file = None
+    try:
+        communicate = edge_tts.Communicate(text, voice="hi-IN-SwaraNeural")
+        await communicate.save(mp3_file)
+        src_file = mp3_file
+    except Exception:
+        # Fallback: espeak-ng female Hindi voice
+        r1 = subprocess.run(
+            ["espeak-ng", "-v", "hi+f2", "-s", "150", "-w", raw_file, text],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if r1.returncode != 0:
+            return r1.returncode
+        src_file = raw_file
+    r = subprocess.run(
+        ["ffmpeg", "-y", "-v", "quiet", "-i", src_file,
          "-ar", "48000", "-ac", "2", "-sample_fmt", "s16", audio_file],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    try:
-        os.remove(raw)
-    except OSError:
-        pass
-    return r2.returncode
+    for f in (mp3_file, raw_file):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+    return r.returncode
 
 
 async def speak_text(chat_id: int, text: str, repeat: int = 1):
     """Text ko audio mein badal kar VC mein play karta hai.
-    espeak-ng (offline Hindi TTS) use karta hai — gTTS yahan
-    rate-limited hai (429) aur edge-tts ko WebSocket chahiye
-    jo proxy se nahi chalta. Audio ki asli duration tak wait
-    karta hai, isliye lamba text beech mein cut nahi hota.
-    Repeat mein VC se leave nahi karta, bas dobara play karta hai."""
-    # Text to Speech (offline, espeak-ng) — thread mein, loop se alag
+    Edge TTS (Microsoft, free, no API key) use karta hai — natural
+    Hindi female voice (hi-IN-SwaraNeural). Railway par direct
+    internet hai, isliye Edge TTS yahan chalta hai. Audio ki asli
+    duration tak wait karta hai, isliye lamba text beech mein cut
+    nahi hota. Repeat mein VC se leave nahi karta, bas dobara play
+    karta hai."""
+    # Text to Speech (Edge TTS, natural Hindi female voice)
     audio_file = f"tts_{chat_id}.wav"
-    rc = await asyncio.to_thread(_gen_tts, text, audio_file)
+    rc = await _gen_tts(text, audio_file)
     if rc != 0 or not os.path.exists(audio_file):
-        raise RuntimeError("TTS audio banane mein fail hua (espeak-ng)")
+        raise RuntimeError("TTS audio banane mein fail hua (Edge TTS)")
 
     # Poora audio bajne ka time (duration + join/play ka buffer)
     duration = get_audio_duration(audio_file, text)
